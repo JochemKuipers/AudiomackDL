@@ -3,6 +3,7 @@ import os
 import re
 import sys
 import time
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -10,7 +11,7 @@ from typing import Any, Iterable
 import requests
 from tqdm import tqdm
 from dotenv import load_dotenv
-from platformdirs import user_downloads_dir
+from platformdirs import user_music_path
 
 
 load_dotenv()
@@ -222,6 +223,34 @@ def _get_signed_url(song_id: int) -> str:
     return signed
 
 
+def _ext_from_signed_url(signed_url: str) -> str | None:
+    try:
+        path = urllib.parse.urlparse(signed_url).path
+    except Exception:
+        return None
+    ext = Path(path).suffix.lower()
+    if ext in {".mp3", ".m4a", ".aac", ".mp4", ".wav", ".flac", ".ogg", ".opus"}:
+        return ext
+    return None
+
+
+def _ext_from_content_type(content_type: str | None) -> str | None:
+    if not content_type:
+        return None
+    ct = content_type.split(";", 1)[0].strip().lower()
+    mapping = {
+        "audio/mpeg": ".mp3",
+        "audio/mp3": ".mp3",
+        "audio/mp4": ".m4a",
+        "audio/aac": ".aac",
+        "audio/wav": ".wav",
+        "audio/flac": ".flac",
+        "audio/ogg": ".ogg",
+        "audio/opus": ".opus",
+    }
+    return mapping.get(ct)
+
+
 def _download_file(url: str, dest: Path, *, timeout_s: int = 60, retries: int = 3) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".part")
@@ -300,7 +329,7 @@ def main(argv: list[str]) -> int:
     args = p.parse_args(argv)
 
     title, songs = _plan_downloads(args.url)
-    root_out = Path(args.out) if args.out else Path(user_downloads_dir()) / "AudiomackDL"
+    root_out = Path(args.out) if args.out else (user_music_path() / "AudiomackDL")
     base_dir = root_out / _safe_name(title)
     base_dir.mkdir(parents=True, exist_ok=True)
 
@@ -310,12 +339,22 @@ def main(argv: list[str]) -> int:
     failures: list[tuple[int, str]] = []
     for i, s in enumerate(songs, start=1):
         prefix = f"{i:02d} - " if len(songs) > 1 else ""
-        filename = _safe_name(f"{prefix}{s.artist} - {s.title}.m4a")
-        dest = base_dir / filename
-        if dest.exists() and dest.stat().st_size > 0:
-            continue
         try:
             signed = _get_signed_url(s.song_id)
+            ext = _ext_from_signed_url(signed)
+            if not ext:
+                try:
+                    head = requests.head(signed, timeout=30, allow_redirects=True)
+                    ext = _ext_from_content_type(head.headers.get("Content-Type"))
+                except Exception:
+                    ext = None
+            ext = ext or ".m4a"
+
+            filename = _safe_name(f"{prefix}{s.artist} - {s.title}") + ext
+            dest = base_dir / filename
+            if dest.exists() and dest.stat().st_size > 0:
+                continue
+
             _download_file(signed, dest, retries=args.retries)
         except Exception as e:
             failures.append((s.song_id, str(e)))
